@@ -97,7 +97,7 @@ conn = st.connection("gsheets", type=GSheetsConnection)
 def cargar_datos():
     try:
         try:
-            return conn.read(spreadsheet=SHEET_URL, worksheet="Hoja1", ttl=0)
+            return conn.read(spreadsheet=SHEET_URL, worksheet="Hoja 1", ttl=0)
         except:
             return conn.read(spreadsheet=SHEET_URL, worksheet="Hoja 1", ttl=0)
     except Exception:
