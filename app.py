@@ -3,20 +3,22 @@ from streamlit_gsheets import GSheetsConnection
 import pandas as pd
 import folium
 from streamlit_folium import st_folium
+from geopy.geocoders import Nominatim
 
-# --- CONFIGURACIÓN DE PÁGINA ---
-st.set_page_config(page_title="🗺️ Mapa Interactivo 📍", page_icon="🗺️", layout="centered")
+# --- CONFIGURACIÓN DE PÁGINA RESPONSIVA ---
+st.set_page_config(page_title="🗺️ Alerta Móvil 📍", page_icon="🗺️", layout="centered")
 
 # --- ENLACE A TU GOOGLE SHEET ---
 SHEET_URL = "https://docs.google.com/spreadsheets/d/11mPB_wV3ogbxgExGj5E7BI_L1uL3tzUxnwDh2NlHn4Q/edit"
 
-# --- INICIALIZACIÓN DEL ESTADO DE MEMORIA (Caché de calles inundadas) ---
+# --- MEMORIA CACHÉ DE EMERGENCIAS ---
 if "zonas_inundadas" not in st.session_state:
     st.session_state.zonas_inundadas = []
 
-# --- CSS: MODO OSCURO FORZADO ---
+# --- CSS: OPTIMIZADO PARA PANTALLAS MÓVILES Y MODO OSCURO ---
 st.markdown('''
     <style>
+    /* Forzar diseño adaptable en móviles */
     .stApp {
         background-color: #1a1a1a; 
         color: white !important;
@@ -24,56 +26,67 @@ st.markdown('''
     h1, h2, h3, h4, h5, h6, p, div, span, label, li, small, strong {
         color: #FFFFFF !important;
     }
-    .stTextInput input, .stTextArea textarea {
+    
+    /* Inputs más grandes para pantallas táctiles */
+    .stTextInput input {
         background-color: #333333 !important; 
         color: white !important;
         border: 1px solid #555 !important;
+        padding: 12px !important;
+        font-size: 16px !important;
     }
+
+    /* Selectores táctiles */
     div[data-baseweb="select"] > div {
         background-color: #333333 !important;
         color: white !important;
         border-color: #555 !important;
+        min-height: 45px !important;
     }
     div[data-baseweb="select"] span { color: white !important; }
     div[data-baseweb="select"] svg { fill: white !important; }
     div[data-baseweb="popover"], div[data-baseweb="menu"], ul { background-color: #222222 !important; }
-    li[id^="bui-"] { color: white !important; }
-    li[aria-selected="false"]:hover { background-color: #444444 !important; }
+    li[id^="bui-"] { color: white !important; padding: 12px !important; }
     
-    .status-card {
+    /* Botón gigante para el pulgar */
+    .stButton button {
+        background-color: #d9534f !important;
+        color: white !important;
+        border: 1px solid white !important;
+        width: 100% !important;
+        padding: 15px !important;
+        font-size: 18px !important;
+        font-weight: bold !important;
+        border-radius: 8px !important;
+    }
+    
+    .status-card, .danger-card {
         background-color: #2b2b2b !important;
         border: 1px solid #444;
         padding: 15px;
         border-radius: 10px;
-        margin-bottom: 10px;
-        border-left: 5px solid #1D6F42;
+        margin-bottom: 12px;
         color: white !important;
     }
-    .danger-card {
-        background-color: #2b2b2b !important;
-        border: 1px solid #444;
-        padding: 15px;
-        border-radius: 10px;
-        margin-bottom: 10px;
-        border-left: 5px solid #d9534f;
-        color: white !important;
-    }
+    .status-card { border-left: 5px solid #1D6F42; }
+    .danger-card { border-left: 5px solid #d9534f; }
+    
     .main-header {
         font-family: 'Helvetica Neue', sans-serif; 
         color: #FFFFFF !important; 
         text-align: center; 
-        font-size: 3em; 
+        font-size: 2.2em; 
         font-weight: bold;
         text-shadow: 2px 2px 4px #000000;
-        padding-bottom: 20px;
-        margin-bottom: 20px;
+        padding-bottom: 10px;
+        margin-bottom: 15px;
         border-bottom: 2px dashed #FFFFFF;
     }
     </style>
-    <div class="main-header">🗺️ Monitoreo Geográfico Interactivo 📍</div>
+    <div class="main-header">🚨 Alerta Vial Puerto Montt 📱</div>
     ''', unsafe_allow_html=True)
 
-# --- FUNCIÓN DE CARGA INTELIGENTE ---
+# --- CARGA DE DATOS ---
 def cargar_datos():
     try:
         csv_url = SHEET_URL.replace("/edit", "/export?format=csv")
@@ -88,9 +101,8 @@ def cargar_datos():
 df = cargar_datos()
 
 if df.empty:
-    st.error("⚠️ No se pudieron recuperar los datos. Asegúrate de que la hoja de cálculo de Google esté configurada con acceso general como 'Cualquier persona con el enlace' en modo Lector.")
+    st.error("⚠️ Error de conexión con la base de datos.")
 else:
-    # --- DETECCIÓN AUTOMÁTICA DE COLUMNAS ---
     col_lat = next((c for c in df.columns if 'lat' in c.lower()), None)
     col_lon = next((c for c in df.columns if 'lon' in c.lower() or 'lng' in c.lower()), None)
     col_name = next((c for c in df.columns if any(k in c.lower() for k in ['nom', 'lug', 'sens', 'id', 'part'])), df.columns[0])
@@ -102,106 +114,99 @@ else:
         
         lista_lugares = df[col_name].unique().tolist()
 
-        st.markdown("<h3 style='text-align: center;'>🔍 Selector de Ubicación</h3>", unsafe_allow_html=True)
-        seleccion = st.selectbox("👇 Elige un punto específico para centrar el mapa:", ["Mostrar vista general"] + lista_lugares)
-        st.caption("💡 *Tip informático: Haz clic directo en cualquier parte del mapa para reportar una calle inundada.*")
-        st.write("")
+        # Selector enfocado a UX móvil
+        seleccion = st.selectbox("📍 Centrar mapa en estación:", ["Vista General"] + lista_lugares)
+        st.caption("📱 *Instrucción: Toca cualquier calle en el mapa para reportar inundación.*")
 
-        # Determinar coordenadas de centrado
-        if seleccion != "Mostrar vista general" and not df[df[col_name] == seleccion].empty:
+        if seleccion != "Vista General" and not df[df[col_name] == seleccion].empty:
             fila_sel = df[df[col_name] == seleccion].iloc[0]
             centro_lat, centro_lon = float(fila_sel[col_lat]), float(fila_sel[col_lon])
-            zoom_inicial = 14
+            zoom_inicial = 15
         else:
             centro_lat, centro_lon = float(df[col_lat].mean()), float(df[col_lon].mean())
-            zoom_inicial = 13
+            zoom_inicial = 14
 
-        # Inicializar mapa base
+        # Construcción del mapa
         mapa = folium.Map(location=[centro_lat, centro_lon], zoom_start=zoom_inicial, tiles="OpenStreetMap")
         
-        # 1. Renderizar puntos base de Google Sheets
+        # Marcadores Base
         for _, fila in df.iterrows():
-            popup_info = "".join([f"<b>{col}:</b> {fila[col]}<br>" for col in df.columns if col not in [col_lat, col_lon]])
             folium.Marker(
                 location=[float(fila[col_lat]), float(fila[col_lon])],
-                popup=folium.Popup(popup_info, max_width=280),
                 tooltip=str(fila[col_name])
             ).add_to(mapa)
         
-        # 2. Renderizar capas poligonales/circulares de Alerta (Calles Inundadas)
+        # Dibujar áreas rojas translúcidas en las calles inundadas
         for zona in st.session_state.zonas_inundadas:
             folium.Circle(
                 location=[zona["lat"], zona["lon"]],
-                radius=60,  # Radio de cobertura en metros para simular el área de la calle
+                radius=50,  # Metros de cobertura sobre la calle
                 color="#d9534f",
                 fill=True,
                 fill_color="#d9534f",
-                fill_opacity=0.45,
-                popup=folium.Popup(f"⚠️ <b>ZONA INUNDADA:</b><br>{zona['calle']}", max_width=200)
+                fill_opacity=0.5,
+                popup=folium.Popup(f"⚠️ <b>Calle Inundada:</b><br>{zona['calle']}", max_width=200)
             ).add_to(mapa)
         
-        # Renderizar el mapa capturando la salida de eventos
-        # Es fundamental definir un 'key' fijo para preservar el estado del iframe
-        mapa_salida = st_folium(mapa, width=700, height=480, key="mapa_monitoreo")
+        # --- RENDERIZADO AJUSTADO A ANCHO MÓVIL (100%) ---
+        mapa_salida = st_folium(mapa, width="100%", height=400, key="mapa_movil")
 
-        # --- LÓGICA DE CAPTURA DE EVENTO CLICK ---
+        # Captura del toque táctil en el celular
         last_clicked = mapa_salida.get("last_clicked") if mapa_salida else None
         
         if last_clicked:
             click_lat = last_clicked["lat"]
             click_lon = last_clicked["lng"]
             
+            # --- ALGORITMO DE DETECCIÓN AUTOMÁTICA DE CALLE (Geocoding) ---
+            with st.spinner("Detectando nombre de la calle..."):
+                try:
+                    geolocator = Nominatim(user_agent="alerta_austral_mobile")
+                    location = geolocator.reverse((click_lat, click_lon), timeout=3)
+                    if location and 'road' in location.raw['address']:
+                        calle_detectada = location.raw['address']['road']
+                    elif location:
+                        calle_detectada = location.address.split(",")[0]
+                    else:
+                        calle_detectada = "Calle desconocida"
+                except Exception:
+                    calle_detectada = "Punto seleccionado"
+
             st.write("---")
-            st.markdown("### 🚨 Reportar Emergencia Vial")
+            st.markdown("### 🚨 Confirmar Reporte de Inundación")
             
-            # Usamos un formulario para controlar el buffer del rerun y evitar falsos positivos
+            # Formulario optimizado para enviar con un solo toque
             with st.form("registro_inundacion", clear_on_submit=True):
-                st.markdown(f"📍 **Coordenadas seleccionadas:** `{click_lat:.5f}, {click_lon:.5f}`")
-                nombre_calle = st.text_input("Nombre de la calle o punto de referencia afectado:", placeholder="Ej: Av. Angelmó esquina Miraflores")
-                boton_reportar = st.form_submit_button("🚨 Declarar Área Inundada / Peligro")
+                st.info(f"📍 Calle detectada: **{calle_detectada}**")
+                
+                # Queda el campo por si el usuario móvil quiere refinar el nombre de la calle
+                calle_final = st.text_input("Confirmar o editar nombre de la vía:", value=calle_detectada)
+                
+                boton_reportar = st.form_submit_button("🚨 REGISTRAR CALLE INUNDADA")
                 
                 if boton_reportar:
-                    if nombre_calle.strip() == "":
-                        st.error("Por favor, ingresa una referencia o calle antes de guardar.")
-                    else:
-                        # Append al estado de la aplicación
-                        st.session_state.zonas_inundadas.append({
-                            "lat": click_lat,
-                            "lon": click_lon,
-                            "calle": nombre_calle
-                        })
-                        st.success(f"Alerta registrada para {nombre_calle}. Actualizando capas espaciales...")
-                        time_sleep = 0.5
-                        st.rerun()
+                    st.session_state.zonas_inundadas.append({
+                        "lat": click_lat,
+                        "lon": click_lon,
+                        "calle": calle_final
+                    })
+                    st.success("¡Alerta registrada con éxito!")
+                    st.rerun()
 
-        # --- SECCIÓN INFERIOR: TARJETAS DE ESTADO Y ALERTA ---
+        # --- SECCIÓN INFERIOR COMPACTA PARA MÓVILES ---
         st.write("---")
-        st.subheader("📊 Panel de Estado e Incidencias Críticas")
+        st.markdown("### 📊 Emergencias Activas")
         
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.markdown("#### 🟢 Puntos de Monitoreo Base")
-            for _, fila in df.iterrows():
+        if not st.session_state.zonas_inundadas:
+            st.info("No hay reportes de calles inundadas en este sector.")
+        else:
+            for zona in st.session_state.zonas_inundadas:
                 st.markdown(f"""
-                <div class="status-card">
-                    <strong>{fila[col_name]}</strong><br>
-                    <span style="font-size: 0.85em; color: #ccc !important;">{fila.get('Descripcion', 'Estación activa')}</span>
+                <div class="danger-card">
+                    <strong>⚠️ {zona['calle']}</strong><br>
+                    <span style="font-size: 0.8em; color: #ffcccc !important;">Inundación detectada vía celular</span>
                 </div>
                 """, unsafe_allow_html=True)
-                
-        with col2:
-            st.markdown("#### 🔴 Alertas de Inundación Activas")
-            if not st.session_state.zonas_inundadas:
-                st.info("No se registran calles inundadas en este cuadrante actualmente.")
-            else:
-                for zona in st.session_state.zonas_inundadas:
-                    st.markdown(f"""
-                    <div class="danger-card">
-                        <strong>⚠️ {zona['calle']}</strong><br>
-                        <span style="font-size: 0.85em; color: #ff9999 !important;">Área de Peligro (Radio: 60m)</span>
-                    </div>
-                    """, unsafe_allow_html=True)
             
     else:
-        st.error(f"❌ Error de esquema: No se encontraron las columnas de coordenadas. Columnas en tu archivo: {list(df.columns)}")
+        st.error("❌ Error en las columnas de la planilla.")
