@@ -10,7 +10,7 @@ st.set_page_config(page_title="🗺️ Mapa Interactivo 📍", page_icon="🗺�
 # --- ENLACE A TU GOOGLE SHEET ---
 SHEET_URL = "https://docs.google.com/spreadsheets/d/11mPB_wV3ogbxgExGj5E7BI_L1uL3tzUxnwDh2NlHn4Q/edit"
 
-# --- CSS: MODO OSCURO FORZADO (Cambiado a comillas triples simples para evitar conflictos) ---
+# --- CSS: MODO OSCURO FORZADO ---
 st.markdown('''
     <style>
     /* 1. FORZAR FONDO Y TEXTO GLOBAL */
@@ -65,13 +65,6 @@ st.markdown('''
         border-left: 5px solid #1D6F42;
         color: white !important;
     }
-
-    /* 6. BOTONES */
-    .stButton button {
-        background-color: #1D6F42 !important;
-        color: white !important;
-        border: 1px solid white !important;
-    }
     
     /* CABECERA */
     .main-header {
@@ -90,19 +83,16 @@ st.markdown('''
     <div class="main-header">🗺️ Monitoreo Geográfico Interactivo 📍</div>
     ''', unsafe_allow_html=True)
 
-# --- FUNCIÓN DE CARGA INTELIGENTE (Bypass directo por CSV) ---
+# --- FUNCIÓN DE CARGA INTELIGENTE ---
 def cargar_datos():
     try:
-        # Convierte el enlace web en una descarga directa de datos crudos (No requiere Secrets)
         csv_url = SHEET_URL.replace("/edit", "/export?format=csv")
         return pd.read_csv(csv_url)
-    except Exception as e_csv:
+    except Exception:
         try:
-            # Fallback secundario si el método CSV falla
             conn = st.connection("gsheets", type=GSheetsConnection)
             return conn.read(spreadsheet=SHEET_URL, ttl=0)
-        except Exception as e_conn:
-            st.error("💥 Error crítico al conectar con la base de datos de Google.")
+        except Exception:
             return pd.DataFrame()
 
 df = cargar_datos()
@@ -116,43 +106,49 @@ else:
     col_name = next((c for c in df.columns if any(k in c.lower() for k in ['nom', 'lug', 'sens', 'id', 'part'])), df.columns[0])
 
     if col_lat and col_lon:
-        # Forzar casteo numérico y limpiar registros corruptos
+        # Asegurar casteo numérico limpio
         df[col_lat] = pd.to_numeric(df[col_lat], errors='coerce')
         df[col_lon] = pd.to_numeric(df[col_lon], errors='coerce')
         df = df.dropna(subset=[col_lat, col_lon])
         
         lista_lugares = df[col_name].unique().tolist()
 
-        with st.container():
-            st.markdown('<div style="background-color: rgba(40, 40, 40, 0.95); padding: 25px; border-radius: 15px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); border: 1px solid #555;">', unsafe_allow_html=True)
-            st.markdown("<h3 style='text-align: center;'>🔍 Selector de Ubicación</h3>", unsafe_allow_html=True)
-            
-            seleccion = st.selectbox("👇 Elige un punto específico para centrar el mapa:", ["Mostrar vista general"] + lista_lugares)
+        # Selector en el entorno nativo oscuro de la app
+        st.markdown("<h3 style='text-align: center;'>🔍 Selector de Ubicación</h3>", unsafe_allow_html=True)
+        seleccion = st.selectbox("👇 Elige un punto específico para centrar el mapa:", ["Mostrar vista general"] + lista_lugares)
+        st.write("")
 
-            if seleccion != "Mostrar vista general":
-                fila_sel = df[df[col_name] == seleccion].iloc[0]
-                centro_lat, centro_lon = fila_sel[col_lat], fila_sel[col_lon]
-                zoom_inicial = 13
-            else:
-                centro_lat, centro_lon = df[col_lat].mean(), df[col_lon].mean()
-                zoom_inicial = 6
+        # Determinar coordenadas de centrado válidas
+        if seleccion != "Mostrar vista general" and not df[df[col_name] == seleccion].empty:
+            fila_sel = df[df[col_name] == seleccion].iloc[0]
+            centro_lat = float(fila_sel[col_lat])
+            centro_lon = float(fila_sel[col_lon])
+            zoom_inicial = 13
+        else:
+            centro_lat = float(df[col_lat].mean())
+            centro_lon = float(df[col_lon].mean())
+            zoom_inicial = 4  # Escala amplia para abarcar los puntos de prueba
 
-            # Inicializar mapa base de Folium
-            mapa = folium.Map(location=[centro_lat, centro_lon], zoom_start=zoom_inicial)
+        # Crear mapa base de Folium de forma segura fuera de bloques HTML inyectados
+        mapa = folium.Map(
+            location=[centro_lat, centro_lon], 
+            zoom_start=zoom_inicial,
+            tiles="OpenStreetMap",
+            control_scale=True
+        )
+        
+        # Marcadores dinámicos
+        for _, fila in df.iterrows():
+            popup_info = "".join([f"<b>{col}:</b> {fila[col]}<br>" for col in df.columns if col not in [col_lat, col_lon]])
             
-            # Marcadores dinámicos
-            for _, fila in df.iterrows():
-                popup_info = "".join([f"<b>{col}:</b> {fila[col]}<br>" for col in df.columns if col not in [col_lat, col_lon]])
-                
-                folium.Marker(
-                    location=[fila[col_lat], fila[col_lon]],
-                    popup=folium.Popup(popup_info, max_width=280),
-                    tooltip=str(fila[col_name])
-                ).add_to(mapa)
-            
-            # Desplegar mapa interactivo
-            st_folium(mapa, width="100%", height=480, returned_objects=[])
-            st.markdown('</div>', unsafe_allow_html=True)
+            folium.Marker(
+                location=[float(fila[col_lat]), float(fila[col_lon])],
+                popup=folium.Popup(popup_info, max_width=280),
+                tooltip=str(fila[col_name])
+            ).add_to(mapa)
+        
+        # Renderizar mapa interactivo de forma nativa
+        st_folium(mapa, width=700, height=480, returned_objects=[])
 
         # --- SECCIÓN INFERIOR: TARJETAS ---
         st.write("---")
