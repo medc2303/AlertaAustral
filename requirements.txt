@@ -1,7 +1,6 @@
 streamlit>=1.35.0
 pandas>=2.0.0
-gspread>=6.0.0
-google-auth>=2.20.0
+st-gsheets-connection>=0.0.3
 folium>=0.15.0
 streamlit-folium>=0.16.0
 geopy>=2.4.0
