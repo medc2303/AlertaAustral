@@ -3,16 +3,29 @@ import pandas as pd
 import folium
 from streamlit_folium import st_folium
 from geopy.geocoders import Nominatim
+import gspread
+from google.oauth2.service_account import Credentials
 
 # --- CONFIGURACIÓN DE PÁGINA RESPONSIVA ---
 st.set_page_config(page_title="🗺️ Alerta Vial Puerto Montt 📍", page_icon="🗺️", layout="centered")
 
-# Enlace público de tu Google Sheet (Modo Lector para cualquier persona con el enlace)
+# Enlace de tu Google Sheet
 SHEET_URL = "https://docs.google.com/spreadsheets/d/11mPB_wV3ogbxgExGj5E7BI_L1uL3tzUxnwDh2NlHn4Q/edit"
 
-# --- INICIALIZACIÓN DE MEMORIA VOLÁTIL (Caché local de incidencias) ---
-if "zonas_inundadas" not in st.session_state:
-    st.session_state.zonas_inundadas = []
+# --- CONEXIÓN CON GOOGLE SHEETS VIA BOT ---
+@st.cache_resource
+def init_gspread():
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive"
+    ]
+    # Se obtienen las credenciales directamente de los secrets de Streamlit
+    credentials = Credentials.from_service_account_info(
+        st.secrets["gcp_service_account"],
+        scopes=scopes
+    )
+    client = gspread.authorize(credentials)
+    return client
 
 # --- CSS: MAQUETACIÓN MODO OSCURO PARA CELULARES ---
 st.markdown('''
@@ -20,7 +33,6 @@ st.markdown('''
     .stApp { background-color: #1a1a1a; color: white !important; }
     h1, h2, h3, h4, h5, h6, p, div, span, label, li, small, strong { color: #FFFFFF !important; }
     
-    /* Inputs adaptados para pulsación táctil móvil */
     .stTextInput input {
         background-color: #333333 !important; 
         color: white !important; 
@@ -29,15 +41,12 @@ st.markdown('''
         font-size: 16px !important;
     }
     
-    div[data-baseweb="select"] > div {
-        background-color: #333333 !important; color: white !important; border-color: #555 !important; min-height: 45px !important;
-    }
+    div[data-baseweb="select"] > div { background-color: #333333 !important; color: white !important; border-color: #555 !important; min-height: 45px !important; }
     div[data-baseweb="select"] span { color: white !important; }
     div[data-baseweb="select"] svg { fill: white !important; }
     div[data-baseweb="popover"], div[data-baseweb="menu"], ul { background-color: #222222 !important; }
     li[id^="bui-"] { color: white !important; padding: 12px !important; }
     
-    /* Botón gigante diseñado para uso con el pulgar */
     .stButton button {
         background-color: #d9534f !important; color: white !important; border: 1px solid white !important;
         width: 100% !important; padding: 15px !important; font-size: 18px !important; font-weight: bold !important; border-radius: 8px !important;
@@ -46,7 +55,6 @@ st.markdown('''
     .status-card, .danger-card {
         background-color: #2b2b2b !important; border: 1px solid #444; padding: 15px; border-radius: 10px; margin-bottom: 12px; color: white !important;
     }
-    .status-card { border-left: 5px solid #1D6F42; }
     .danger-card { border-left: 5px solid #d9534f; }
     
     .main-header {
@@ -56,116 +64,106 @@ st.markdown('''
     <div class="main-header">🚨 Alerta Vial Puerto Montt 📱</div>
     ''', unsafe_allow_html=True)
 
-# --- CARGA DE DATOS POR BYPASS CSV PÚBLICO (Inmune a fallos de API) ---
-def cargar_datos_base():
-    try:
-        # Forzamos la descarga del dataset crudo mapeando el endpoint de exportación
-        csv_url = SHEET_URL.replace("/edit", "/export?format=csv")
-        return pd.read_csv(csv_url)
-    except Exception as e:
-        st.error(f"Error al conectar con el dataset público de Google: {e}")
-        return pd.DataFrame()
-
-df = cargar_datos_base()
+# --- FLUJO PRINCIPAL ---
+try:
+    gc = init_gspread()
+    sheet = gc.open_by_url(SHEET_URL).sheet1
+    
+    # Obtener todos los registros y convertirlos en un DataFrame
+    datos = sheet.get_all_records()
+    df = pd.DataFrame(datos)
+    
+except Exception as e:
+    st.error(f"Error crítico conectando con Google Sheets: {e}")
+    df = pd.DataFrame()
 
 if df.empty:
-    st.error("⚠️ No se pudieron recuperar los puntos geográficos base de la planilla.")
+    st.error("⚠️ La hoja de cálculo está vacía o no se pudo cargar.")
 else:
-    # Sanitización y casteo de tipos para la API de Folium
+    # Sanitización de datos
     df["Latitud"] = pd.to_numeric(df["Latitud"], errors='coerce')
     df["Longitud"] = pd.to_numeric(df["Longitud"], errors='coerce')
     df = df.dropna(subset=["Latitud", "Longitud"])
 
-    puntos_base = df[df["Estado"].str.lower() != "inundado"]
+    # Separar estaciones base (opcional si mantienes esa lógica) de alertas activas (inundado)
+    # Aquí asumimos que todos los reportes de usuario caen con estado "Inundado"
+    alertas_activas = df[df["Estado"].str.lower() == "inundado"]
 
-    # Selector de ubicación móvil
-    lista_estaciones = puntos_base["Lugar"].unique().tolist()
-    seleccion = st.selectbox("📍 Centrar mapa en estación:", ["Vista General"] + lista_estaciones)
-    st.caption("📱 *Instrucción móvil: Toca cualquier calle en el mapa para reportar una inundación en tiempo real.*")
+    # --- CONFIGURACIÓN ESTRICTA DEL MAPA EN PUERTO MONTT ---
+    centro_lat_pm = -41.4693
+    centro_lon_pm = -72.9423
+    zoom_inicial = 14
 
-    if seleccion != "Vista General":
-        fila_sel = puntos_base[puntos_base["Lugar"] == seleccion].iloc[0]
-        centro_lat, centro_lon = float(fila_sel["Latitud"]), float(fila_sel["Longitud"])
-        zoom_inicial = 15
-    else:
-        centro_lat, centro_lon = float(df["Latitud"].mean()), float(df["Longitud"].mean())
-        zoom_inicial = 14
+    st.caption("📱 *Toca cualquier calle en el mapa para reportar una inundación a la base de datos.*")
 
-    # Instanciar el mapa base
-    mapa = folium.Map(location=[centro_lat, centro_lon], zoom_start=zoom_inicial, tiles="OpenStreetMap")
+    # Instanciar el mapa
+    mapa = folium.Map(location=[centro_lat_pm, centro_lon_pm], zoom_start=zoom_inicial, tiles="OpenStreetMap")
 
-    # 1. Pintar marcadores de las estaciones fijas (Datos de GSheets)
-    for _, fila in puntos_base.iterrows():
-        folium.Marker(
-            location=[float(fila["Latitud"]), float(fila["Longitud"])],
-            popup=folium.Popup(f"<b>Estación:</b> {fila['Lugar']}<br>{fila['Descripcion']}", max_width=200),
-            tooltip=str(fila["Lugar"])
-        ).add_to(mapa)
-
-    # 2. Pintar áreas circulares rojas translúcidas guardadas localmente en memoria
-    for zona in st.session_state.zonas_inundadas:
+    # Pintar TODAS las alertas activas obtenidas de la hoja
+    for _, fila in alertas_activas.iterrows():
         folium.Circle(
-            location=[zona["lat"], zona["lon"]],
-            radius=50,  # Radio de cobertura perimetral en metros sobre la calle
+            location=[float(fila["Latitud"]), float(fila["Longitud"])],
+            radius=50,
             color="#d9534f",
             fill=True,
             fill_color="#d9534f",
             fill_opacity=0.5,
-            popup=folium.Popup(f"⚠️ <b>Calle Inundada:</b><br>{zona['lugar']}<br><i>{zona['descripcion']}</i>", max_width=200)
+            popup=folium.Popup(f"⚠️ <b>{fila['Lugar']}</b><br><i>{fila['Descripcion']}</i>", max_width=200)
         ).add_to(mapa)
 
-    # Renderizado adaptable al 100% de la pantalla del dispositivo móvil
-    mapa_salida = st_folium(mapa, width="100%", height=400, key="mapa_memoria_movil")
+    # Renderizado
+    mapa_salida = st_folium(mapa, width="100%", height=400, key="mapa_movil_pm")
 
-    # Capturar coordenadas del evento táctil del celular
+    # --- LÓGICA DE REPORTE Y ESCRITURA EN GOOGLE SHEETS ---
     last_clicked = mapa_salida.get("last_clicked") if mapa_salida else None
 
     if last_clicked:
         click_lat = last_clicked["lat"]
         click_lon = last_clicked["lng"]
 
-        # Algoritmo de geocodificación inversa para evitar el tipeo manual en celulares
-        with st.spinner("Localizando nombre de la vía..."):
+        with st.spinner("Localizando..."):
             try:
-                geolocator = Nominatim(user_agent="alerta_austral_bypass_v1")
+                geolocator = Nominatim(user_agent="pm_alerts_bot")
                 location = geolocator.reverse((click_lat, click_lon), timeout=3)
                 calle_detectada = location.raw['address']['road'] if location and 'road' in location.raw['address'] else "Punto Registrado"
             except Exception:
-                calle_detectada = "Punto Registrado"
+                calle_detectada = "Punto Registrado en el mapa"
 
         st.write("---")
-        st.markdown("### 🚨 Confirmar Reporte de Emergencia")
+        st.markdown("### 🚨 Confirmar y Enviar Alerta")
 
-        with st.form("registro_inundacion", clear_on_submit=True):
+        with st.form("registro_inundacion_db", clear_on_submit=True):
             st.info(f"📍 Calle detectada: **{calle_detectada}**")
-            calle_final = st.text_input("Confirmar nombre de la vía:", value=calle_detectada)
+            calle_final = st.text_input("Nombre de la vía:", value=calle_detectada)
             descripcion_incidente = st.text_input("Detalle del incidente:", value="Agua acumulada en calzada")
 
-            boton_reportar = st.form_submit_button("🚨 REGISTRAR CALLE INUNDADA (TEMPORAL)")
+            boton_reportar = st.form_submit_button("🚨 GUARDAR REPORTE EN BASE DE DATOS")
 
             if boton_reportar:
-                # Almacenar de forma atómica en la estructura del session_state local
-                st.session_state.zonas_inundadas.append({
-                    "lugar": calle_final,
-                    "lat": click_lat,
-                    "lon": click_lon,
-                    "descripcion": descripcion_incidente
-                })
-                st.success("¡Alerta de inundación registrada localmente con éxito!")
-                st.rerun()
+                # El orden de la lista debe coincidir EXACTAMENTE con las columnas de tu Google Sheet
+                # Ejemplo de columnas esperadas: [Lugar, Latitud, Longitud, Descripcion, Estado]
+                nueva_fila = [calle_final, click_lat, click_lon, descripcion_incidente, "Inundado"]
+                
+                try:
+                    sheet.append_row(nueva_fila)
+                    st.success("¡Alerta registrada exitosamente en Google Sheets!")
+                    # Limpiamos el caché de los datos para forzar recarga en el próximo render
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Fallo al guardar en la base de datos: {e}")
 
-    # --- PANEL INFERIOR DE MONITOREO ---
+    # --- PANEL DE MONITOREO EN VIVO ---
     st.write("---")
-    st.markdown("### 📊 Emergencias Activas (Sesión Actual)")
+    st.markdown(f"### 📊 Emergencias Activas ({len(alertas_activas)})")
 
-    if not st.session_state.zonas_inundadas:
-        st.info("No se registran calles inundadas en esta sesión actualmente.")
+    if alertas_activas.empty:
+        st.info("La base de datos no registra calles inundadas actualmente.")
     else:
-        for zona in st.session_state.zonas_inundadas:
+        for _, alerta in alertas_activas.iterrows():
             st.markdown(f"""
             <div class="danger-card">
-                <strong>⚠️ {zona['lugar']}</strong><br>
-                <span style="font-size: 0.85em; color: #ffcccc !important;">{zona['descripcion']}</span><br>
-                <span style="font-size: 0.8em; color: #aaa !important;">Coordenadas: {zona['lat']:.4f}, {zona['lon']:.4f}</span>
+                <strong>⚠️ {alerta['Lugar']}</strong><br>
+                <span style="font-size: 0.85em; color: #ffcccc !important;">{alerta['Descripcion']}</span><br>
+                <span style="font-size: 0.8em; color: #aaa !important;">Coord: {alerta['Latitud']:.4f}, {alerta['Longitud']:.4f}</span>
             </div>
             """, unsafe_allow_html=True)
