@@ -11,7 +11,7 @@ from datetime import datetime
 st.set_page_config(page_title="🗺️ Alerta Austral 📍", page_icon="🗺️", layout="centered")
 
 # Enlace de tu Google Sheet V2 (Con columna "Hora" incluida)
-SHEET_URL = "https://docs.google.com/spreadsheets/d/1vWFqk19u1zY1qRBe7x5VVolC4oUlUFA1_R9V1cWeKjc/edit"
+SHEET_URL = "https://docs.google.com/spreadsheets/d/11mPB_wV3ogbxgExGj5E7BI_L1uL3tzUxnwDh2NlHn4Q/edit"
 
 # --- INICIALIZACIÓN DE ESTADO PERSISTENTE ---
 if "click_lat" not in st.session_state:
