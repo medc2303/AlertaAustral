@@ -10,12 +10,14 @@ from datetime import datetime
 # --- CONFIGURACIÓN DE PÁGINA RESPONSIVA ---
 st.set_page_config(page_title="🗺️ Alerta Austral 📍", page_icon="🗺️", layout="centered")
 
-# Tu hoja original de siempre
+# Tu hoja original
 SHEET_URL = "https://docs.google.com/spreadsheets/d/11mPB_wV3ogbxgExGj5E7BI_L1uL3tzUxnwDh2NlHn4Q/edit"
 
 # --- INICIALIZACIÓN DE ESTADO PERSISTENTE ---
 if "ultimo_click_procesado" not in st.session_state:
     st.session_state.ultimo_click_procesado = None
+if "ultimo_objeto_clickeado" not in st.session_state:
+    st.session_state.ultimo_objeto_clickeado = None
 
 # --- CONEXIÓN CON GOOGLE SHEETS VIA BOT ---
 @st.cache_resource
@@ -63,8 +65,7 @@ def obtener_calles():
 def obtener_paraderos():
     try:
         gc = init_gspread()
-        # Se conecta explícitamente a la nueva "Hoja 2"
-        sheet = gc.open_by_url(SHEET_URL).worksheet("Hoja 2")
+        sheet = gc.open_by_url(SHEET_URL).worksheet("Hoja 2") # Pestaña Paraderos
         return limpiar_dataframe(pd.DataFrame(sheet.get_all_records()))
     except Exception as e:
         st.error(f"Error cargando paraderos (Hoja 2): {e}")
@@ -94,13 +95,17 @@ def actualizar_estado_db(fila_ref, nuevo_estado, nombre_pestana="sheet1"):
             if fila_a_modificar:
                 sheet.update_cell(fila_a_modificar, 5, nuevo_estado)
                 hora_actual = datetime.now().strftime("%H:%M (%d/%m)")
-                sheet.update_cell(fila_a_modificar, 6, hora_actual)
                 
-                # Purgamos ambos cachés para forzar rediseño visual
+                # Intentamos actualizar la hora si la columna existe (índice 6)
+                if len(r) >= 6 or sheet.col_count >= 6:
+                    sheet.update_cell(fila_a_modificar, 6, hora_actual)
+                
+                # Purgamos ambos cachés para forzar actualización visual
                 obtener_calles.clear()
                 obtener_paraderos.clear()
                 st.success("¡Base de datos sincronizada!")
                 st.session_state.ultimo_click_procesado = None
+                st.session_state.ultimo_objeto_clickeado = None
                 st.rerun()
             else:
                 st.error("No se encontró el registro físico en las celdas.")
@@ -126,6 +131,7 @@ def modal_nueva_alerta(lat, lon):
     with col1:
         if st.button("❌ Cancelar", use_container_width=True):
             st.session_state.ultimo_click_procesado = None
+            st.session_state.ultimo_objeto_clickeado = None
             st.rerun()
     with col2:
         if st.button("🚨 Guardar Alerta", type="primary", use_container_width=True):
@@ -133,11 +139,12 @@ def modal_nueva_alerta(lat, lon):
             nueva_fila = [calle_final, str(lat), str(lon), descripcion_incidente, "Inundado", hora_reporte]
             try:
                 gc = init_gspread()
-                sheet = gc.open_by_url(SHEET_URL).sheet1 # Va directo a la pestaña de calles
+                sheet = gc.open_by_url(SHEET_URL).sheet1
                 sheet.insert_row(nueva_fila, index=2)
                 obtener_calles.clear()
                 st.success("¡Alerta registrada!")
                 st.session_state.ultimo_click_procesado = None
+                st.session_state.ultimo_objeto_clickeado = None
                 st.rerun()
             except Exception as e:
                 st.error(f"Error al guardar: {e}")
@@ -151,6 +158,7 @@ def modal_eliminar_alerta(alerta):
     with col1:
         if st.button("❌ Cancelar", use_container_width=True):
             st.session_state.ultimo_click_procesado = None
+            st.session_state.ultimo_objeto_clickeado = None
             st.rerun()
     with col2:
         if st.button("✅ Despejar Calle", type="primary", use_container_width=True):
@@ -177,6 +185,7 @@ def modal_gestionar_paradero(paradero):
 
     if st.button("❌ Cerrar menú", use_container_width=True):
         st.session_state.ultimo_click_procesado = None
+        st.session_state.ultimo_objeto_clickeado = None
         st.rerun()
 
 # --- CSS MODO OSCURO MÓVIL ---
@@ -222,7 +231,7 @@ st.caption("📱 *Toca una calle para reportar, o toca un Paradero (🚏) para a
 
 mapa = folium.Map(location=[centro_lat_pm, centro_lon_pm], zoom_start=zoom_inicial, tiles="OpenStreetMap")
 
-# 1. Pintar Calles Inundadas (Desde pestaña principal)
+# 1. Pintar Calles Inundadas
 if not calles_inundadas.empty:
     for _, fila in calles_inundadas.iterrows():
         folium.Circle(
@@ -231,7 +240,7 @@ if not calles_inundadas.empty:
             tooltip="Calle Inundada (Toca para administrar)"
         ).add_to(mapa)
 
-# 2. Pintar Paraderos (Desde "Hoja 2")
+# 2. Pintar Paraderos
 if not paraderos_activos.empty:
     for _, p in paraderos_activos.iterrows():
         estado_p = p["Estado_clean"]
@@ -256,31 +265,45 @@ if not paraderos_activos.empty:
 
 mapa_salida = st_folium(mapa, width="100%", height=400, key="mapa_movil_pm")
 
-# --- PROCESAMIENTO DE CLICKS CON MODALS ---
-click_actual = mapa_salida.get("last_clicked")
+# --- PROCESAMIENTO INTELIGENTE DE CLICKS (MAPA Y MARCADORES) ---
+click_mapa = mapa_salida.get("last_clicked")
+click_objeto = mapa_salida.get("last_object_clicked")
 
-if click_actual and click_actual != st.session_state.ultimo_click_procesado:
-    st.session_state.ultimo_click_procesado = click_actual
-    lat_actual = click_actual["lat"]
-    lon_actual = click_actual["lng"]
+click_a_procesar = None
 
-    # 1. Comprobar si tocó un Paradero de la "Hoja 2" (Prioridad táctil)
+# Priorizamos si se tocó directamente el marcador (ícono de bus)
+if click_objeto and click_objeto != st.session_state.ultimo_objeto_clickeado:
+    st.session_state.ultimo_objeto_clickeado = click_objeto
+    click_a_procesar = click_objeto
+
+# Si no tocó marcador, revisamos si tocó una parte del mapa (calle o zona cercana)
+elif click_mapa and click_mapa != st.session_state.ultimo_click_procesado:
+    st.session_state.ultimo_click_procesado = click_mapa
+    click_a_procesar = click_mapa
+
+# Si hay un toque válido registrado
+if click_a_procesar:
+    lat_actual = click_a_procesar["lat"]
+    lon_actual = click_a_procesar["lng"]
+
+    # 1. Comprobar si tocó un Paradero (Hoja 2)
     paradero_coincidente = None
     if not paraderos_activos.empty:
         for _, p in paraderos_activos.iterrows():
-            if abs(p["Latitud"] - lat_actual) < 0.0006 and abs(p["Longitud"] - lon_actual) < 0.0006:
+            # Tolerancia un poco más amplia para que no cueste acertarle en pantallas táctiles
+            if abs(p["Latitud"] - lat_actual) < 0.0008 and abs(p["Longitud"] - lon_actual) < 0.0008:
                 paradero_coincidente = p
                 break
 
-    # 2. Comprobar si tocó una Calle Inundada de la primera pestaña
+    # 2. Comprobar si tocó una Calle Inundada (Pestaña principal)
     alerta_coincidente = None
     if paradero_coincidente is None and not calles_inundadas.empty:
         for _, fila_activa in calles_inundadas.iterrows():
-            if abs(fila_activa["Latitud"] - lat_actual) < 0.0007 and abs(fila_activa["Longitud"] - lon_actual) < 0.0007:
+            if abs(fila_activa["Latitud"] - lat_actual) < 0.0008 and abs(fila_activa["Longitud"] - lon_actual) < 0.0008:
                 alerta_coincidente = fila_activa
                 break
 
-    # 3. Lanzar Modal según corresponda
+    # 3. Lanzar Modal según el tipo de elemento
     if paradero_coincidente is not None:
         modal_gestionar_paradero(paradero_coincidente)
     elif alerta_coincidente is not None:
