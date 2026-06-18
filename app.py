@@ -240,7 +240,7 @@ if not calles_inundadas.empty:
             tooltip="Calle Inundada (Toca para administrar)"
         ).add_to(mapa)
 
-# 2. Pintar Paraderos (Siempre dibujamos el ícono del bus)
+# 2. Pintar Paraderos (SOLO dibujamos el ícono del bus con su color respectivo)
 if not paraderos_activos.empty:
     for _, p in paraderos_activos.iterrows():
         estado_p = p["Estado_clean"]
@@ -255,13 +255,7 @@ if not paraderos_activos.empty:
             ).add_to(mapa)
             
         elif estado_p == "paradero inundado":
-            # Dibujamos el círculo rojo
-            folium.Circle(
-                location=[lat, lon],
-                radius=15, color="#d9534f", fill=True, fill_color="#d9534f", fill_opacity=0.8,
-                tooltip="🚨 Paradero Inundado (Toca para despejar)"
-            ).add_to(mapa)
-            # Dibujamos el marcador del bus en color rojo encima del círculo
+            # Marcador rojo sin círculo
             folium.Marker(
                 location=[lat, lon],
                 icon=folium.Icon(color="red", icon="bus", prefix="fa"),
@@ -269,13 +263,7 @@ if not paraderos_activos.empty:
             ).add_to(mapa)
             
         elif estado_p == "paradero mal estado":
-            # Dibujamos el círculo naranjo
-            folium.Circle(
-                location=[lat, lon],
-                radius=15, color="#f0ad4e", fill=True, fill_color="#f0ad4e", fill_opacity=0.8,
-                tooltip="⚠️ Paradero en Mal Estado (Toca para despejar)"
-            ).add_to(mapa)
-            # Dibujamos el marcador del bus en color naranjo encima del círculo
+            # Marcador naranjo sin círculo
             folium.Marker(
                 location=[lat, lon],
                 icon=folium.Icon(color="orange", icon="bus", prefix="fa"),
