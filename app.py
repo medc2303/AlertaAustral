@@ -10,7 +10,8 @@ from datetime import datetime
 # --- CONFIGURACIÓN DE PÁGINA RESPONSIVA ---
 st.set_page_config(page_title="🗺️ Alerta Austral 📍", page_icon="🗺️", layout="centered")
 
-SHEET_URL = "https://docs.google.com/spreadsheets/d/11mPB_wV3ogbxgExGj5E7BI_L1uL3tzUxnwDh2NlHn4Q/edit"
+# Enlace de tu Google Sheet V2 (Con columna "Hora" incluida)
+SHEET_URL = "https://docs.google.com/spreadsheets/d/1vWFqk19u1zY1qRBe7x5VVolC4oUlUFA1_R9V1cWeKjc/edit"
 
 # --- INICIALIZACIÓN DE ESTADO PERSISTENTE ---
 if "click_lat" not in st.session_state:
@@ -31,6 +32,18 @@ def init_gspread():
     )
     client = gspread.authorize(credentials)
     return client
+
+# --- LECTURA DE DATOS CON CACHÉ (PREVIENE ERROR 429) ---
+@st.cache_data(ttl=30)
+def obtener_datos_hoja():
+    try:
+        gc = init_gspread()
+        sheet = gc.open_by_url(SHEET_URL).sheet1
+        datos = sheet.get_all_records()
+        return pd.DataFrame(datos)
+    except Exception as e:
+        st.error(f"Error crítico conectando con Google Sheets: {e}")
+        return pd.DataFrame()
 
 # --- CSS MODO OSCURO MÓVIL ---
 st.markdown('''
@@ -66,15 +79,7 @@ st.markdown('''
     ''', unsafe_allow_html=True)
 
 # --- FLUJO PRINCIPAL Y LIMPIEZA DE DATOS ---
-try:
-    gc = init_gspread()
-    sheet = gc.open_by_url(SHEET_URL).sheet1
-    datos = sheet.get_all_records()
-    df = pd.DataFrame(datos)
-    
-except Exception as e:
-    st.error(f"Error crítico conectando con Google Sheets: {e}")
-    df = pd.DataFrame()
+df = obtener_datos_hoja()
 
 if df.empty:
     alertas_activas = pd.DataFrame()
@@ -88,6 +93,7 @@ else:
         df["Latitud"] = pd.to_numeric(df["Latitud"], errors='coerce')
         df["Longitud"] = pd.to_numeric(df["Longitud"], errors='coerce')
         
+        # Corrección de decimales si Google Sheets los desplaza
         df.loc[df["Latitud"] < -90, "Latitud"] = df["Latitud"] / 10000
         df.loc[df["Longitud"] < -180, "Longitud"] = df["Longitud"] / 10000
 
@@ -155,7 +161,8 @@ if st.session_state.click_lat is not None and st.session_state.click_lon is not 
             if boton_despejar:
                 try:
                     with st.spinner("Actualizando base de datos..."):
-                        # Descargar todos los registros planos para encontrar el número de fila física en el Sheet
+                        gc = init_gspread()
+                        sheet = gc.open_by_url(SHEET_URL).sheet1
                         valores_crudos = sheet.get_all_values()
                         fila_a_modificar = None
 
@@ -163,7 +170,6 @@ if st.session_state.click_lat is not None and st.session_state.click_lon is not 
                             try:
                                 r_lat = float(str(r[1]).replace(',', '.'))
                                 r_lon = float(str(r[2]).replace(',', '.'))
-                                # Validamos coincidencia exacta por posición y que siga "Inundado"
                                 if abs(r_lat - alerta_coincidente["Latitud"]) < 1e-4 and abs(r_lon - alerta_coincidente["Longitud"]) < 1e-4 and r[4] == "Inundado":
                                     fila_a_modificar = i
                                     break
@@ -175,9 +181,10 @@ if st.session_state.click_lat is not None and st.session_state.click_lon is not 
                             sheet.update_cell(fila_a_modificar, 5, "Historial")
                             st.success("¡Perfecto! Alerta movida con éxito al historial de emergencias antiguas.")
                             
-                            # Limpiar la memoria del click y refrescar
+                            # Limpiar la memoria del click y PURGAR CACHÉ
                             st.session_state.click_lat = None
                             st.session_state.click_lon = None
+                            obtener_datos_hoja.clear()
                             st.rerun()
                         else:
                             st.error("No se pudo enlazar el marcador con la fila correspondiente en la planilla.")
@@ -203,19 +210,19 @@ if st.session_state.click_lat is not None and st.session_state.click_lon is not 
             boton_reportar = st.form_submit_button("🚨 REGISTRAR CALLE INUNDADA")
 
             if boton_reportar:
-                # Capturamos el tiempo local en formato legible
                 hora_reporte = datetime.now().strftime("%H:%M (%d/%m)")
-                
-                # REQUISITO DE COLUMNAS EN TU HOJA:
-                # A: Lugar | B: Latitud | C: Longitud | D: Descripcion | E: Estado | F: Hora
                 nueva_fila = [calle_final, str(lat_actual), str(lon_actual), descripcion_incidente, "Inundado", hora_reporte]
                 
                 try:
+                    gc = init_gspread()
+                    sheet = gc.open_by_url(SHEET_URL).sheet1
                     sheet.insert_row(nueva_fila, index=2)
                     st.success("¡Alerta registrada exitosamente en el sistema!")
                     
+                    # Limpiar la memoria del click y PURGAR CACHÉ
                     st.session_state.click_lat = None
                     st.session_state.click_lon = None
+                    obtener_datos_hoja.clear()
                     st.rerun()
                 except Exception as e:
                     st.error(f"Fallo al guardar en la base de datos: {e}")
@@ -229,7 +236,6 @@ if alertas_activas.empty:
     st.info("La base de datos no registra calles inundadas actualmente.")
 else:
     for _, alerta in alertas_activas.iterrows():
-        # Extracción segura de la hora con fallback si es un registro antiguo
         hora_display = alerta.get('Hora', '---') if pd.notna(alerta.get('Hora')) and alerta.get('Hora') != "" else "---"
         
         st.markdown(f"""
