@@ -10,7 +10,7 @@ from datetime import datetime
 # --- CONFIGURACIÓN DE PÁGINA RESPONSIVA ---
 st.set_page_config(page_title="🗺️ Alerta Austral 📍", page_icon="🗺️", layout="centered")
 
-# Usando tu hoja original
+# Tu hoja original de siempre
 SHEET_URL = "https://docs.google.com/spreadsheets/d/11mPB_wV3ogbxgExGj5E7BI_L1uL3tzUxnwDh2NlHn4Q/edit"
 
 # --- INICIALIZACIÓN DE ESTADO PERSISTENTE ---
@@ -31,23 +31,53 @@ def init_gspread():
     client = gspread.authorize(credentials)
     return client
 
+# --- FUNCIONES DE LIMPIEZA MATEMÁTICA ---
+def limpiar_dataframe(df):
+    if df.empty:
+        return df
+    df.columns = df.columns.str.strip()
+    if "Latitud" in df.columns and "Longitud" in df.columns:
+        df["Latitud"] = df["Latitud"].astype(str).str.replace(',', '.')
+        df["Longitud"] = df["Longitud"].astype(str).str.replace(',', '.')
+        df["Latitud"] = pd.to_numeric(df["Latitud"], errors='coerce')
+        df["Longitud"] = pd.to_numeric(df["Longitud"], errors='coerce')
+        df.loc[df["Latitud"] < -90, "Latitud"] = df["Latitud"] / 10000
+        df.loc[df["Longitud"] < -180, "Longitud"] = df["Longitud"] / 10000
+        df = df.dropna(subset=["Latitud", "Longitud"])
+    if "Estado" in df.columns:
+        df["Estado_clean"] = df["Estado"].astype(str).str.strip().str.lower()
+    return df
+
+# --- LECTURAS INDEPENDIENTES DE PESTAÑAS (CON CACHÉ ANTI-429) ---
 @st.cache_data(ttl=30)
-def obtener_datos_hoja():
+def obtener_calles():
     try:
         gc = init_gspread()
-        sheet = gc.open_by_url(SHEET_URL).sheet1
-        datos = sheet.get_all_records()
-        return pd.DataFrame(datos)
+        sheet = gc.open_by_url(SHEET_URL).sheet1  # Pestaña Principal (Calles)
+        return limpiar_dataframe(pd.DataFrame(sheet.get_all_records()))
     except Exception as e:
-        st.error(f"Error crítico conectando con Google Sheets: {e}")
+        st.error(f"Error cargando calles: {e}")
         return pd.DataFrame()
 
-# --- FUNCIÓN AYUDANTE PARA ACTUALIZAR ESTADOS EN DB ---
-def actualizar_estado_db(fila_ref, nuevo_estado):
+@st.cache_data(ttl=30)
+def obtener_paraderos():
+    try:
+        gc = init_gspread()
+        # Se conecta explícitamente a la nueva "Hoja 2"
+        sheet = gc.open_by_url(SHEET_URL).worksheet("Hoja 2")
+        return limpiar_dataframe(pd.DataFrame(sheet.get_all_records()))
+    except Exception as e:
+        st.error(f"Error cargando paraderos (Hoja 2): {e}")
+        return pd.DataFrame()
+
+# --- FUNCIÓN CENTRALIZADA DE ACTUALIZACIÓN ---
+def actualizar_estado_db(fila_ref, nuevo_estado, nombre_pestana="sheet1"):
     try:
         with st.spinner("Actualizando base de datos..."):
             gc = init_gspread()
-            sheet = gc.open_by_url(SHEET_URL).sheet1
+            doc = gc.open_by_url(SHEET_URL)
+            sheet = doc.sheet1 if nombre_pestana == "sheet1" else doc.worksheet(nombre_pestana)
+            
             valores_crudos = sheet.get_all_values()
             fila_a_modificar = None
 
@@ -55,7 +85,6 @@ def actualizar_estado_db(fila_ref, nuevo_estado):
                 try:
                     r_lat = float(str(r[1]).replace(',', '.'))
                     r_lon = float(str(r[2]).replace(',', '.'))
-                    # Coincidencia por coordenadas y por el Estado que tenía antes
                     if abs(r_lat - fila_ref["Latitud"]) < 1e-4 and abs(r_lon - fila_ref["Longitud"]) < 1e-4 and str(r[4]).strip() == fila_ref["Estado"]:
                         fila_a_modificar = i
                         break
@@ -63,19 +92,18 @@ def actualizar_estado_db(fila_ref, nuevo_estado):
                     continue
 
             if fila_a_modificar:
-                # Actualizar Estado
                 sheet.update_cell(fila_a_modificar, 5, nuevo_estado)
-                # Actualizar Hora
                 hora_actual = datetime.now().strftime("%H:%M (%d/%m)")
-                if len(r) >= 6:
-                    sheet.update_cell(fila_a_modificar, 6, hora_actual)
+                sheet.update_cell(fila_a_modificar, 6, hora_actual)
                 
-                obtener_datos_hoja.clear()
-                st.success("¡Base de datos actualizada!")
+                # Purgamos ambos cachés para forzar rediseño visual
+                obtener_calles.clear()
+                obtener_paraderos.clear()
+                st.success("¡Base de datos sincronizada!")
                 st.session_state.ultimo_click_procesado = None
                 st.rerun()
             else:
-                st.error("No se encontró el registro exacto en la planilla.")
+                st.error("No se encontró el registro físico en las celdas.")
     except Exception as e:
         st.error(f"Error: {e}")
 
@@ -105,9 +133,9 @@ def modal_nueva_alerta(lat, lon):
             nueva_fila = [calle_final, str(lat), str(lon), descripcion_incidente, "Inundado", hora_reporte]
             try:
                 gc = init_gspread()
-                sheet = gc.open_by_url(SHEET_URL).sheet1
+                sheet = gc.open_by_url(SHEET_URL).sheet1 # Va directo a la pestaña de calles
                 sheet.insert_row(nueva_fila, index=2)
-                obtener_datos_hoja.clear()
+                obtener_calles.clear()
                 st.success("¡Alerta registrada!")
                 st.session_state.ultimo_click_procesado = None
                 st.rerun()
@@ -126,7 +154,7 @@ def modal_eliminar_alerta(alerta):
             st.rerun()
     with col2:
         if st.button("✅ Despejar Calle", type="primary", use_container_width=True):
-            actualizar_estado_db(alerta, "Historial")
+            actualizar_estado_db(alerta, "Historial", "sheet1")
 
 @st.dialog("🚏 Gestionar Paradero")
 def modal_gestionar_paradero(paradero):
@@ -138,14 +166,14 @@ def modal_gestionar_paradero(paradero):
         col1, col2 = st.columns(2)
         with col1:
             if st.button("🌊 Inundado", use_container_width=True):
-                actualizar_estado_db(paradero, "Paradero Inundado")
+                actualizar_estado_db(paradero, "Paradero Inundado", "Hoja 2")
         with col2:
             if st.button("⚠️ Mal Estado", use_container_width=True):
-                actualizar_estado_db(paradero, "Paradero Mal Estado")
+                actualizar_estado_db(paradero, "Paradero Mal Estado", "Hoja 2")
     else:
         st.markdown("<p style='text-align: center; font-weight: bold;'>¿Este paradero ya fue reparado o despejado?</p>", unsafe_allow_html=True)
         if st.button("✅ Volver a la Normalidad", type="primary", use_container_width=True):
-            actualizar_estado_db(paradero, "Paradero Normal")
+            actualizar_estado_db(paradero, "Paradero Normal", "Hoja 2")
 
     if st.button("❌ Cerrar menú", use_container_width=True):
         st.session_state.ultimo_click_procesado = None
@@ -166,38 +194,24 @@ st.markdown('''
     <div class="main-header">🚨 Alerta Austral 📱</div>
     ''', unsafe_allow_html=True)
 
-# --- LÓGICA PRINCIPAL ---
-df = obtener_datos_hoja()
+# --- CARGA DE DATOS SEPARADOS ---
+df_calles = obtener_calles()
+df_paraderos = obtener_paraderos()
 
-if df.empty:
-    df_procesado = pd.DataFrame()
-else:
-    df.columns = df.columns.str.strip()
-    if "Latitud" in df.columns and "Longitud" in df.columns:
-        df["Latitud"] = df["Latitud"].astype(str).str.replace(',', '.')
-        df["Longitud"] = df["Longitud"].astype(str).str.replace(',', '.')
-        df["Latitud"] = pd.to_numeric(df["Latitud"], errors='coerce')
-        df["Longitud"] = pd.to_numeric(df["Longitud"], errors='coerce')
-        df.loc[df["Latitud"] < -90, "Latitud"] = df["Latitud"] / 10000
-        df.loc[df["Longitud"] < -180, "Longitud"] = df["Longitud"] / 10000
-        df = df.dropna(subset=["Latitud", "Longitud"])
-        
-    if "Estado" in df.columns:
-        df["Estado_clean"] = df["Estado"].astype(str).str.strip().str.lower()
-        df_procesado = df
-    else:
-        df_procesado = pd.DataFrame()
+# Procesamiento segmentado
+calles_inundadas = df_calles[df_calles["Estado_clean"] == "inundado"] if not df_calles.empty else pd.DataFrame()
+paraderos_activos = df_paraderos if not df_paraderos.empty else pd.DataFrame()
 
-# Clasificación de datos
-calles_inundadas = pd.DataFrame()
-paraderos = pd.DataFrame()
-emergencias_activas = pd.DataFrame()
+# Construir panel inferior (Combinando reportes críticos)
+lista_emergencias = []
+if not calles_inundadas.empty:
+    lista_emergencias.append(calles_inundadas)
+if not paraderos_activos.empty:
+    paraderos_con_problemas = paraderos_activos[paraderos_activos["Estado_clean"].isin(["paradero inundado", "paradero mal estado"])]
+    if not paraderos_con_problemas.empty:
+        lista_emergencias.append(paraderos_con_problemas)
 
-if not df_procesado.empty:
-    calles_inundadas = df_procesado[df_procesado["Estado_clean"] == "inundado"]
-    paraderos = df_procesado[df_procesado["Estado_clean"].str.contains("paradero")]
-    # Para el panel inferior, juntamos calles inundadas y paraderos con problemas
-    emergencias_activas = df_procesado[df_procesado["Estado_clean"].isin(["inundado", "paradero inundado", "paradero mal estado"])]
+emergencias_activas = pd.concat(lista_emergencias, ignore_index=True) if lista_emergencias else pd.DataFrame()
 
 # --- RENDERIZADO DEL MAPA ---
 centro_lat_pm = -41.4693
@@ -208,7 +222,7 @@ st.caption("📱 *Toca una calle para reportar, o toca un Paradero (🚏) para a
 
 mapa = folium.Map(location=[centro_lat_pm, centro_lon_pm], zoom_start=zoom_inicial, tiles="OpenStreetMap")
 
-# 1. Pintar Calles Inundadas (Círculo Grande 50m Rojo)
+# 1. Pintar Calles Inundadas (Desde pestaña principal)
 if not calles_inundadas.empty:
     for _, fila in calles_inundadas.iterrows():
         folium.Circle(
@@ -217,26 +231,23 @@ if not calles_inundadas.empty:
             tooltip="Calle Inundada (Toca para administrar)"
         ).add_to(mapa)
 
-# 2. Pintar Paraderos (Íconos o Círculos Pequeños 15m)
-if not paraderos.empty:
-    for _, p in paraderos.iterrows():
+# 2. Pintar Paraderos (Desde "Hoja 2")
+if not paraderos_activos.empty:
+    for _, p in paraderos_activos.iterrows():
         estado_p = p["Estado_clean"]
         if estado_p == "paradero normal":
-            # Ícono de bus azul para paraderos normales
             folium.Marker(
                 location=[float(p["Latitud"]), float(p["Longitud"])],
                 icon=folium.Icon(color="blue", icon="bus", prefix="fa"),
                 tooltip="🚏 Paradero Normal (Toca para reportar)"
             ).add_to(mapa)
         elif estado_p == "paradero inundado":
-            # Círculo pequeño rojo
             folium.Circle(
                 location=[float(p["Latitud"]), float(p["Longitud"])],
                 radius=15, color="#d9534f", fill=True, fill_color="#d9534f", fill_opacity=0.8,
                 tooltip="🚨 Paradero Inundado (Toca para despejar)"
             ).add_to(mapa)
         elif estado_p == "paradero mal estado":
-            # Círculo pequeño naranjo
             folium.Circle(
                 location=[float(p["Latitud"]), float(p["Longitud"])],
                 radius=15, color="#f0ad4e", fill=True, fill_color="#f0ad4e", fill_opacity=0.8,
@@ -253,15 +264,15 @@ if click_actual and click_actual != st.session_state.ultimo_click_procesado:
     lat_actual = click_actual["lat"]
     lon_actual = click_actual["lng"]
 
-    # 1. Verificar si tocó un Paradero (Alta prioridad)
+    # 1. Comprobar si tocó un Paradero de la "Hoja 2" (Prioridad táctil)
     paradero_coincidente = None
-    if not paraderos.empty:
-        for _, p in paraderos.iterrows():
+    if not paraderos_activos.empty:
+        for _, p in paraderos_activos.iterrows():
             if abs(p["Latitud"] - lat_actual) < 0.0006 and abs(p["Longitud"] - lon_actual) < 0.0006:
                 paradero_coincidente = p
                 break
 
-    # 2. Verificar si tocó una Calle Inundada existente
+    # 2. Comprobar si tocó una Calle Inundada de la primera pestaña
     alerta_coincidente = None
     if paradero_coincidente is None and not calles_inundadas.empty:
         for _, fila_activa in calles_inundadas.iterrows():
@@ -269,7 +280,7 @@ if click_actual and click_actual != st.session_state.ultimo_click_procesado:
                 alerta_coincidente = fila_activa
                 break
 
-    # 3. Disparar Modal correspondiente
+    # 3. Lanzar Modal según corresponda
     if paradero_coincidente is not None:
         modal_gestionar_paradero(paradero_coincidente)
     elif alerta_coincidente is not None:
@@ -289,7 +300,6 @@ else:
         hora_display = alerta.get('Hora', '---') if pd.notna(alerta.get('Hora')) and alerta.get('Hora') != "" else "---"
         estado_alerta = alerta.get('Estado_clean', '')
         
-        # Asignar estilo según gravedad
         clase_css = "warning-card" if estado_alerta == "paradero mal estado" else "danger-card"
         icono = "⚠️" if estado_alerta == "paradero mal estado" else "🚨"
 
