@@ -240,26 +240,45 @@ if not calles_inundadas.empty:
             tooltip="Calle Inundada (Toca para administrar)"
         ).add_to(mapa)
 
-# 2. Pintar Paraderos
+# 2. Pintar Paraderos (Siempre dibujamos el ícono del bus)
 if not paraderos_activos.empty:
     for _, p in paraderos_activos.iterrows():
         estado_p = p["Estado_clean"]
+        lat = float(p["Latitud"])
+        lon = float(p["Longitud"])
+        
         if estado_p == "paradero normal":
             folium.Marker(
-                location=[float(p["Latitud"]), float(p["Longitud"])],
+                location=[lat, lon],
                 icon=folium.Icon(color="blue", icon="bus", prefix="fa"),
                 tooltip="🚏 Paradero Normal (Toca para reportar)"
             ).add_to(mapa)
+            
         elif estado_p == "paradero inundado":
+            # Dibujamos el círculo rojo
             folium.Circle(
-                location=[float(p["Latitud"]), float(p["Longitud"])],
+                location=[lat, lon],
                 radius=15, color="#d9534f", fill=True, fill_color="#d9534f", fill_opacity=0.8,
                 tooltip="🚨 Paradero Inundado (Toca para despejar)"
             ).add_to(mapa)
+            # Dibujamos el marcador del bus en color rojo encima del círculo
+            folium.Marker(
+                location=[lat, lon],
+                icon=folium.Icon(color="red", icon="bus", prefix="fa"),
+                tooltip="🚨 Paradero Inundado (Toca para despejar)"
+            ).add_to(mapa)
+            
         elif estado_p == "paradero mal estado":
+            # Dibujamos el círculo naranjo
             folium.Circle(
-                location=[float(p["Latitud"]), float(p["Longitud"])],
+                location=[lat, lon],
                 radius=15, color="#f0ad4e", fill=True, fill_color="#f0ad4e", fill_opacity=0.8,
+                tooltip="⚠️ Paradero en Mal Estado (Toca para despejar)"
+            ).add_to(mapa)
+            # Dibujamos el marcador del bus en color naranjo encima del círculo
+            folium.Marker(
+                location=[lat, lon],
+                icon=folium.Icon(color="orange", icon="bus", prefix="fa"),
                 tooltip="⚠️ Paradero en Mal Estado (Toca para despejar)"
             ).add_to(mapa)
 
@@ -290,7 +309,6 @@ if click_a_procesar:
     paradero_coincidente = None
     if not paraderos_activos.empty:
         for _, p in paraderos_activos.iterrows():
-            # Tolerancia un poco más amplia para que no cueste acertarle en pantallas táctiles
             if abs(p["Latitud"] - lat_actual) < 0.0008 and abs(p["Longitud"] - lon_actual) < 0.0008:
                 paradero_coincidente = p
                 break
