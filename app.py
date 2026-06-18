@@ -5,13 +5,14 @@ from streamlit_folium import st_folium
 from geopy.geocoders import Nominatim
 import gspread
 from google.oauth2.service_account import Credentials
+from datetime import datetime
 
 # --- CONFIGURACIÓN DE PÁGINA RESPONSIVA ---
 st.set_page_config(page_title="🗺️ Alerta Austral 📍", page_icon="🗺️", layout="centered")
 
 SHEET_URL = "https://docs.google.com/spreadsheets/d/11mPB_wV3ogbxgExGj5E7BI_L1uL3tzUxnwDh2NlHn4Q/edit"
 
-# --- INICIALIZACIÓN DE ESTADO PERSISTENTE (Solución de Coordenadas) ---
+# --- INICIALIZACIÓN DE ESTADO PERSISTENTE ---
 if "click_lat" not in st.session_state:
     st.session_state.click_lat = None
 if "click_lon" not in st.session_state:
@@ -45,6 +46,11 @@ st.markdown('''
     .stButton button {
         background-color: #d9534f !important; color: white !important; border: 1px solid white !important;
         width: 100% !important; padding: 15px !important; font-size: 18px !important; font-weight: bold !important; border-radius: 8px !important;
+    }
+    
+    /* Variación de botón verde para solucionar/despejar calles */
+    div.stForm [data-testid="stFormSubmitButton"] button {
+        background-color: #d9534f !important;
     }
     
     .status-card, .danger-card {
@@ -87,17 +93,18 @@ else:
 
         df = df.dropna(subset=["Latitud", "Longitud"])
 
+    # Filtrar únicamente las que siguen marcadas estrictamente como "Inundado"
     if "Estado" in df.columns:
         alertas_activas = df[df["Estado"].astype(str).str.strip().str.lower() == "inundado"]
     else:
         alertas_activas = df
 
-# --- CONFIGURACIÓN DEL MAPA ---
+# --- CONFIGURACIÓN DEL MAPA EN PUERTO MONTT ---
 centro_lat_pm = -41.4693
 centro_lon_pm = -72.9423
 zoom_inicial = 14
 
-st.caption("📱 *Toca cualquier calle en el mapa para reportar una inundación a la base de datos.*")
+st.caption("📱 *Toca una zona vacía para reportar, o toca un círculo rojo existente para remover la alerta si la calle se despejó.*")
 
 mapa = folium.Map(location=[centro_lat_pm, centro_lon_pm], zoom_start=zoom_inicial, tiles="OpenStreetMap")
 
@@ -111,58 +118,109 @@ if not alertas_activas.empty:
             fill=True,
             fill_color="#d9534f",
             fill_opacity=0.5,
-            popup=folium.Popup(f"⚠️ <b>{fila.get('Lugar', 'Punto Registrado')}</b><br><i>{fila.get('Descripcion', '')}</i>", max_width=200)
+            popup=folium.Popup(f"⚠️ <b>{fila.get('Lugar', 'Punto Registrado')}</b><br>🕒 {fila.get('Hora', '---')}<br><i>{fila.get('Descripcion', '')}</i>", max_width=200)
         ).add_to(mapa)
 
 mapa_salida = st_folium(mapa, width="100%", height=400, key="mapa_movil_pm")
 
 # --- CAPTURA PERSISTENTE DEL CLICK ---
 if mapa_salida and mapa_salida.get("last_clicked"):
-    # Guardamos en memoria solo si el click es un evento nuevo
     st.session_state.click_lat = mapa_salida["last_clicked"]["lat"]
     st.session_state.click_lon = mapa_salida["last_clicked"]["lng"]
 
-# Si hay coordenadas en memoria, desplegamos el formulario
+# Si hay coordenadas en memoria, evaluamos qué tipo de acción ejecutar
 if st.session_state.click_lat is not None and st.session_state.click_lon is not None:
-    # Bloqueamos las variables de lectura usando la memoria del servidor
     lat_actual = st.session_state.click_lat
     lon_actual = st.session_state.click_lon
 
-    with st.spinner("Localizando..."):
-        try:
-            geolocator = Nominatim(user_agent="alerta_austral_bot")
-            location = geolocator.reverse((lat_actual, lon_actual), timeout=3)
-            calle_detectada = location.raw['address']['road'] if location and 'road' in location.raw['address'] else "Punto Registrado"
-        except Exception:
-            calle_detectada = "Punto Registrado"
+    # Verificar si el click está encima o extremadamente cerca de una alerta existente (tolerancia de rango táctil)
+    alerta_coincidente = None
+    if not alertas_activas.empty:
+        for idx, fila_activa in alertas_activas.iterrows():
+            if abs(fila_activa["Latitud"] - lat_actual) < 0.0007 and abs(fila_activa["Longitud"] - lon_actual) < 0.0007:
+                alerta_coincidente = fila_activa
+                break
 
     st.write("---")
-    st.markdown("### 🚨 Confirmar y Enviar Alerta")
 
-    with st.form("registro_inundacion_db", clear_on_submit=True):
-        st.info(f"📍 Calle detectada: **{calle_detectada}**")
-        calle_final = st.text_input("Nombre de la vía:", value=calle_detectada)
-        descripcion_incidente = st.text_input("Detalle del incidente:", value="Agua acumulada en calzada")
+    # CASO A: EL USUARIO TOCÓ UNA ALERTA EXISTENTE -> MENÚ PARA ELIMINAR / ARCHIVAR
+    if alerta_coincidente is not None:
+        st.markdown("### 🔄 Gestionar Emergencia Existente")
+        st.info(f"📍 **Calle:** {alerta_coincidente.get('Lugar')}\n\n🕒 **Reportado a las:** {alerta_coincidente.get('Hora', 'Sin Registro')}\n\n📝 **Detalle:** {alerta_coincidente.get('Descripcion')}")
+        
+        with st.form("eliminar_emergencia_form", clear_on_submit=True):
+            st.markdown("<p style='color: #ffcccc !important; font-weight: bold;'>¿Esta calle ya no se encuentra inundada y el tránsito volvió a la normalidad?</p>", unsafe_allow_html=True)
+            boton_despejar = st.form_submit_button("✅ SÍ, LA CALLE YA NO ESTÁ INUNDADA (Mover a Historial)")
 
-        boton_reportar = st.form_submit_button("🚨 GUARDAR REPORTE")
+            if boton_despejar:
+                try:
+                    with st.spinner("Actualizando base de datos..."):
+                        # Descargar todos los registros planos para encontrar el número de fila física en el Sheet
+                        valores_crudos = sheet.get_all_values()
+                        fila_a_modificar = None
 
-        if boton_reportar:
-            nueva_fila = [calle_final, str(lat_actual), str(lon_actual), descripcion_incidente, "Inundado"]
-            
+                        for i, r in enumerate(valores_crudos[1:], start=2):
+                            try:
+                                r_lat = float(str(r[1]).replace(',', '.'))
+                                r_lon = float(str(r[2]).replace(',', '.'))
+                                # Validamos coincidencia exacta por posición y que siga "Inundado"
+                                if abs(r_lat - alerta_coincidente["Latitud"]) < 1e-4 and abs(r_lon - alerta_coincidente["Longitud"]) < 1e-4 and r[4] == "Inundado":
+                                    fila_a_modificar = i
+                                    break
+                            except:
+                                continue
+
+                        if fila_a_modificar:
+                            # Columna E es la 5 (Estado). Cambiamos "Inundado" por "Historial"
+                            sheet.update_cell(fila_a_modificar, 5, "Historial")
+                            st.success("¡Perfecto! Alerta movida con éxito al historial de emergencias antiguas.")
+                            
+                            # Limpiar la memoria del click y refrescar
+                            st.session_state.click_lat = None
+                            st.session_state.click_lon = None
+                            st.rerun()
+                        else:
+                            st.error("No se pudo enlazar el marcador con la fila correspondiente en la planilla.")
+                except Exception as e:
+                    st.error(f"Error al conectar con la base de datos: {e}")
+
+    # CASO B: EL USUARIO TOCÓ UN LUGAR VACÍO -> FORMULARIO DE NUEVO REPORTE
+    else:
+        st.markdown("### 🚨 Confirmar y Enviar Alerta Nueva")
+        with st.spinner("Localizando nombre de la vía..."):
             try:
-                sheet.insert_row(nueva_fila, index=2)
-                st.success("¡Alerta registrada exitosamente en Google Sheets!")
-                
-                # PURGA DE ESTADO: Limpiamos la memoria tras la inserción exitosa
-                st.session_state.click_lat = None
-                st.session_state.click_lon = None
-                
-                # Forzamos un rerun para limpiar la UI y actualizar el mapa
-                st.rerun()
-            except Exception as e:
-                st.error(f"Fallo al guardar en la base de datos: {e}")
+                geolocator = Nominatim(user_agent="alerta_austral_bot")
+                location = geolocator.reverse((lat_actual, lon_actual), timeout=3)
+                calle_detectada = location.raw['address']['road'] if location and 'road' in location.raw['address'] else "Punto Registrado"
+            except Exception:
+                calle_detectada = "Punto Registrado"
 
-# --- PANEL DE MONITOREO ---
+        with st.form("registro_inundacion_db", clear_on_submit=True):
+            st.info(f"📍 Coordenadas capturadas correctamente en la vía.")
+            calle_final = st.text_input("Confirmar nombre de la calle:", value=calle_detectada)
+            descripcion_incidente = st.text_input("Detalle del incidente:", value="Agua acumulada en calzada")
+
+            boton_reportar = st.form_submit_button("🚨 REGISTRAR CALLE INUNDADA")
+
+            if boton_reportar:
+                # Capturamos el tiempo local en formato legible
+                hora_reporte = datetime.now().strftime("%H:%M (%d/%m)")
+                
+                # REQUISITO DE COLUMNAS EN TU HOJA:
+                # A: Lugar | B: Latitud | C: Longitud | D: Descripcion | E: Estado | F: Hora
+                nueva_fila = [calle_final, str(lat_actual), str(lon_actual), descripcion_incidente, "Inundado", hora_reporte]
+                
+                try:
+                    sheet.insert_row(nueva_fila, index=2)
+                    st.success("¡Alerta registrada exitosamente en el sistema!")
+                    
+                    st.session_state.click_lat = None
+                    st.session_state.click_lon = None
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Fallo al guardar en la base de datos: {e}")
+
+# --- PANEL DE MONITOREO EN VIVO ---
 st.write("---")
 cantidad_alertas = len(alertas_activas) if not alertas_activas.empty else 0
 st.markdown(f"### 📊 Emergencias Activas ({cantidad_alertas})")
@@ -171,10 +229,18 @@ if alertas_activas.empty:
     st.info("La base de datos no registra calles inundadas actualmente.")
 else:
     for _, alerta in alertas_activas.iterrows():
+        # Extracción segura de la hora con fallback si es un registro antiguo
+        hora_display = alerta.get('Hora', '---') if pd.notna(alerta.get('Hora')) and alerta.get('Hora') != "" else "---"
+        
         st.markdown(f"""
         <div class="danger-card">
-            <strong>⚠️ {alerta.get('Lugar', 'Alerta Registrada')}</strong><br>
-            <span style="font-size: 0.85em; color: #ffcccc !important;">{alerta.get('Descripcion', '')}</span><br>
-            <span style="font-size: 0.8em; color: #aaa !important;">Coord: {alerta.get('Latitud', 0):.4f}, {alerta.get('Longitud', 0):.4f}</span>
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+                <strong>⚠️ {alerta.get('Lugar', 'Alerta Registrada')}</strong>
+                <span style="font-size: 0.85em; color: #aaaaaa !important; font-weight: bold; background-color: #333; padding: 2px 8px; border-radius: 5px;">🕒 {hora_display}</span>
+            </div>
+            <div style="margin-top: 5px;">
+                <span style="font-size: 0.85em; color: #ffcccc !important;">{alerta.get('Descripcion', '')}</span><br>
+                <span style="font-size: 0.8em; color: #aaa !important;">Coord: {alerta.get('Latitud', 0):.4f}, {alerta.get('Longitud', 0):.4f}</span>
+            </div>
         </div>
         """, unsafe_allow_html=True)
