@@ -94,7 +94,7 @@ def actualizar_estado_db(fila_ref, nuevo_estado, nombre_pestana="sheet1"):
 
             if fila_a_modificar:
                 sheet.update_cell(fila_a_modificar, 5, nuevo_estado)
-                hora_actual = datetime.now().strftime("%H:%M (%d/%m)")
+                hora_actual = datetime.now(ZoneInfo("America/Santiago")).strftime("%H:%M (%d/%m)")
                 
                 # Intentamos actualizar la hora si la columna existe (índice 6)
                 if len(r) >= 6 or sheet.col_count >= 6:
@@ -135,7 +135,7 @@ def modal_nueva_alerta(lat, lon):
             st.rerun()
     with col2:
         if st.button("🚨 Guardar Alerta", type="primary", use_container_width=True):
-            hora_reporte = datetime.now().strftime("%H:%M (%d/%m)")
+            hora_reporte = datetime.now(ZoneInfo("America/Santiago")).strftime("%H:%M (%d/%m)")
             nueva_fila = [calle_final, str(lat), str(lon), descripcion_incidente, "Inundado", hora_reporte]
             try:
                 gc = init_gspread()
