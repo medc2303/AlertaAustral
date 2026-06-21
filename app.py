@@ -329,4 +329,22 @@ st.markdown(f"### 📊 Emergencias Activas ({cantidad_alertas})")
 if emergencias_activas.empty:
     st.info("La ciudad no registra emergencias en calles ni paraderos actualmente.")
 else:
-    for _, alerta in emergencias_
+    for _, alerta in emergencias_activas.iterrows():
+        hora_display = alerta.get('Hora', '---') if pd.notna(alerta.get('Hora')) and alerta.get('Hora') != "" else "---"
+        estado_alerta = alerta.get('Estado_clean', '')
+        
+        clase_css = "warning-card" if estado_alerta == "paradero mal estado" else "danger-card"
+        icono = "⚠️" if estado_alerta == "paradero mal estado" else "🚨"
+
+        st.markdown(f"""
+        <div class="{clase_css}">
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+                <strong>{icono} {alerta.get('Lugar', 'Punto Registrado')}</strong>
+                <span style="font-size: 0.85em; color: #aaaaaa !important; font-weight: bold; background-color: #333; padding: 2px 8px; border-radius: 5px;">🕒 {hora_display}</span>
+            </div>
+            <div style="margin-top: 5px;">
+                <span style="font-size: 0.85em; color: #ffcccc !important;">{alerta.get('Descripcion', '')}</span><br>
+                <span style="font-size: 0.8em; color: #aaa !important;">Coord: {alerta.get('Latitud', 0):.4f}, {alerta.get('Longitud', 0):.4f}</span>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
