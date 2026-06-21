@@ -6,6 +6,7 @@ from geopy.geocoders import Nominatim
 import gspread
 from google.oauth2.service_account import Credentials
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 # --- CONFIGURACIÓN DE PÁGINA RESPONSIVA ---
 st.set_page_config(page_title="🗺️ Alerta Austral 📍", page_icon="🗺️", layout="centered")
@@ -94,7 +95,9 @@ def actualizar_estado_db(fila_ref, nuevo_estado, nombre_pestana="sheet1"):
 
             if fila_a_modificar:
                 sheet.update_cell(fila_a_modificar, 5, nuevo_estado)
-                hora_actual = datetime.now().strftime("%H:%M (%d/%m)")
+                
+                # Ajuste de hora para Chile (Santiago/Puerto Montt)
+                hora_actual = datetime.now(ZoneInfo("America/Santiago")).strftime("%H:%M (%d/%m)")
                 
                 # Intentamos actualizar la hora si la columna existe (índice 6)
                 if len(r) >= 6 or sheet.col_count >= 6:
@@ -135,7 +138,8 @@ def modal_nueva_alerta(lat, lon):
             st.rerun()
     with col2:
         if st.button("🚨 Guardar Alerta", type="primary", use_container_width=True):
-            hora_reporte = datetime.now().strftime("%H:%M (%d/%m)")
+            # Ajuste de hora para Chile
+            hora_reporte = datetime.now(ZoneInfo("America/Santiago")).strftime("%H:%M (%d/%m)")
             nueva_fila = [calle_final, str(lat), str(lon), descripcion_incidente, "Inundado", hora_reporte]
             try:
                 gc = init_gspread()
@@ -325,22 +329,4 @@ st.markdown(f"### 📊 Emergencias Activas ({cantidad_alertas})")
 if emergencias_activas.empty:
     st.info("La ciudad no registra emergencias en calles ni paraderos actualmente.")
 else:
-    for _, alerta in emergencias_activas.iterrows():
-        hora_display = alerta.get('Hora', '---') if pd.notna(alerta.get('Hora')) and alerta.get('Hora') != "" else "---"
-        estado_alerta = alerta.get('Estado_clean', '')
-        
-        clase_css = "warning-card" if estado_alerta == "paradero mal estado" else "danger-card"
-        icono = "⚠️" if estado_alerta == "paradero mal estado" else "🚨"
-
-        st.markdown(f"""
-        <div class="{clase_css}">
-            <div style="display: flex; justify-content: space-between; align-items: center;">
-                <strong>{icono} {alerta.get('Lugar', 'Punto Registrado')}</strong>
-                <span style="font-size: 0.85em; color: #aaaaaa !important; font-weight: bold; background-color: #333; padding: 2px 8px; border-radius: 5px;">🕒 {hora_display}</span>
-            </div>
-            <div style="margin-top: 5px;">
-                <span style="font-size: 0.85em; color: #ffcccc !important;">{alerta.get('Descripcion', '')}</span><br>
-                <span style="font-size: 0.8em; color: #aaa !important;">Coord: {alerta.get('Latitud', 0):.4f}, {alerta.get('Longitud', 0):.4f}</span>
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
+    for _, alerta in emergencias_
