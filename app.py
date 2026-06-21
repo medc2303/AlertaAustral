@@ -128,7 +128,7 @@ def modal_nueva_alerta(lat, lon):
 
     st.info("📍 Coordenadas capturadas correctamente en la calle.")
     calle_final = st.text_input("Confirmar nombre de la calle:", value=calle_detectada)
-    descripcion_incidente = st.text_input("Detalle del incidente:", value="Agua acumulada en calzada")
+    descripcion_incidente = st.text_input("Detalle del incidente:", value="Calle inundada")
 
     col1, col2 = st.columns(2)
     with col1:
